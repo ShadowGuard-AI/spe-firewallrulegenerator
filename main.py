@@ -16,7 +16,7 @@ def setup_argparse():
     Sets up the argument parser for the CLI.
     """
     parser = argparse.ArgumentParser(
-        description="Security Policy Enforcer. Validates system configurations against a defined policy."
+        description="Generates iptables style firewall rules from a policy file holding a rules list, and validates a data file against a JSON Schema held in a policy file."
     )
     parser.add_argument(
         "policy_file",
@@ -25,7 +25,9 @@ def setup_argparse():
     )
     parser.add_argument(
         "data_file",
-        help="Path to the YAML/JSON data file containing system configuration, user settings, or application behavior.",
+        nargs="?",
+        default=None,
+        help="Path to the YAML/JSON data file to validate. Required in schema validation mode; not used when the policy file holds a rules list to generate from.",
         type=str,
     )
     parser.add_argument(
@@ -71,10 +73,6 @@ def load_data(file_path):
         raise
 
 
-# Despite the repo name, nothing in this file generates a firewall
-# rule. The policy file is treated as a box holding one JSON schema,
-# and the data file is validated against it. The output is a single
-# valid or not valid line and nothing else.
 def validate_data(data, schema):
     """
     Validates data against a JSON schema.
@@ -87,9 +85,6 @@ def validate_data(data, schema):
         bool: True if the data is valid, False otherwise.
     """
     try:
-        # Collapsing the result to a bool throws away which field
-        # failed and why. The ValidationError text is logged here, but
-        # the caller and the printed report never see it.
         validate(instance=data, schema=schema)
         return True
     except ValidationError as e:
@@ -100,40 +95,74 @@ def validate_data(data, schema):
         return False
 
 
+def generate_firewall_rules(policy_data):
+    """Emit one iptables style line per policy rule, or None if no rules list."""
+    rules = None
+    if isinstance(policy_data, dict):
+        if isinstance(policy_data.get("rules"), list):
+            rules = policy_data["rules"]
+        elif isinstance(policy_data.get("rule"), dict):
+            rules = [policy_data["rule"]]
+    if rules is None:
+        return None
+    lines = []
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            raise ValueError(f"Rule {i} is not a mapping.")
+        action_raw = str(rule.get("action", rule.get("effect", ""))).strip().lower()
+        if action_raw in ("allow", "accept", "permit"):
+            target = "ACCEPT"
+        elif action_raw in ("deny", "drop", "block", "reject"):
+            target = "DROP"
+        else:
+            raise ValueError(f"Rule {i} has no recognized action (allow or deny).")
+        protocol = str(rule.get("protocol", "tcp")).strip().lower()
+        port = rule.get("port", rule.get("destination_port"))
+        source = str(rule.get("source", rule.get("src", "0.0.0.0/0")))
+        line = f"iptables -A INPUT -p {protocol} -s {source}"
+        if port is not None:
+            line += f" --dport {int(port)}"
+        line += f" -j {target}"
+        lines.append(line)
+    return lines
+
+
+
 def main():
-    """
-    Main function to load policy and data, validate the data against the policy,
-    and report any violations.
-    """
     parser = setup_argparse()
     args = parser.parse_args()
-
-    # Set log level
     logging.getLogger().setLevel(args.log_level)
-
     try:
         policy_data = load_data(args.policy_file)
-        data_to_validate = load_data(args.data_file)
-
+        if not isinstance(policy_data, dict) or not policy_data:
+            logging.error("Policy file is empty: nothing was generated or validated.")
+            sys.exit(2)
+        rules_lines = generate_firewall_rules(policy_data)
+        if rules_lines is not None:
+            if not rules_lines:
+                logging.error("Policy rules list is empty: no firewall rules generated.")
+                sys.exit(2)
+            for line in rules_lines:
+                print(line)
+            return
         if "schema" not in policy_data:
-            logging.error("Policy file must contain a 'schema' key.")
+            logging.error("Policy file must contain a 'schema' key or a 'rules' list.")
             sys.exit(1)
-
+        if not args.data_file:
+            logging.error("A data file is required in schema validation mode.")
+            sys.exit(2)
+        data_to_validate = load_data(args.data_file)
         schema = policy_data["schema"]
         is_valid = validate_data(data_to_validate, schema)
-
-        # Both branches fall through to a zero exit. A policy failure
-        # is reported in words only, so a pipeline that wants to stop
-        # on a violation has to grep the output, not read the status.
         if is_valid:
             logging.info("Data is valid according to the policy.")
             print("Data is valid according to the policy.")
         else:
             logging.warning("Data does not conform to the defined policy.")
             print("Data does not conform to the defined policy.")
-            # Example: Provide more detailed output based on violations
-            # This would require more complex logic based on the schema and validation errors.
-
+            sys.exit(1)
+    except SystemExit:
+        raise
     except Exception as e:
         logging.critical(f"An unexpected error occurred: {e}")
         sys.exit(1)
