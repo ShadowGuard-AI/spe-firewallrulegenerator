@@ -71,6 +71,10 @@ def load_data(file_path):
         raise
 
 
+# Despite the repo name, nothing in this file generates a firewall
+# rule. The policy file is treated as a box holding one JSON schema,
+# and the data file is validated against it. The output is a single
+# valid or not valid line and nothing else.
 def validate_data(data, schema):
     """
     Validates data against a JSON schema.
@@ -83,6 +87,9 @@ def validate_data(data, schema):
         bool: True if the data is valid, False otherwise.
     """
     try:
+        # Collapsing the result to a bool throws away which field
+        # failed and why. The ValidationError text is logged here, but
+        # the caller and the printed report never see it.
         validate(instance=data, schema=schema)
         return True
     except ValidationError as e:
@@ -115,6 +122,9 @@ def main():
         schema = policy_data["schema"]
         is_valid = validate_data(data_to_validate, schema)
 
+        # Both branches fall through to a zero exit. A policy failure
+        # is reported in words only, so a pipeline that wants to stop
+        # on a violation has to grep the output, not read the status.
         if is_valid:
             logging.info("Data is valid according to the policy.")
             print("Data is valid according to the policy.")
