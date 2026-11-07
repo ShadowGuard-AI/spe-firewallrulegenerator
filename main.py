@@ -4,6 +4,8 @@ import sys
 import yaml
 import json
 from jsonschema import validate, ValidationError
+import ipaddress
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -117,11 +119,27 @@ def generate_firewall_rules(policy_data):
         else:
             raise ValueError(f"Rule {i} has no recognized action (allow or deny).")
         protocol = str(rule.get("protocol", "tcp")).strip().lower()
+        if not re.fullmatch(r"[a-z0-9]+", protocol):
+            raise ValueError(f"Rule {i} has an invalid protocol: {protocol!r}.")
         port = rule.get("port", rule.get("destination_port"))
-        source = str(rule.get("source", rule.get("src", "0.0.0.0/0")))
+        source = str(rule.get("source", rule.get("src", "0.0.0.0/0"))).strip()
+        try:
+            ipaddress.ip_network(source, strict=False)
+        except ValueError:
+            raise ValueError(f"Rule {i} has an invalid source (expected an IP address or CIDR range): {source!r}.")
         line = f"iptables -A INPUT -p {protocol} -s {source}"
         if port is not None:
-            line += f" --dport {int(port)}"
+            if isinstance(port, bool):
+                raise ValueError(f"Rule {i} has an invalid port: {port!r}.")
+            try:
+                port_num = int(port)
+            except (TypeError, ValueError):
+                raise ValueError(f"Rule {i} has an invalid port: {port!r}.")
+            if str(port).strip() not in (str(port_num), f"+{port_num}") and not isinstance(port, int):
+                raise ValueError(f"Rule {i} has an invalid port: {port!r}.")
+            if not 0 <= port_num <= 65535:
+                raise ValueError(f"Rule {i} port is out of range (0 to 65535): {port_num}.")
+            line += f" --dport {port_num}"
         line += f" -j {target}"
         lines.append(line)
     return lines
